@@ -1,0 +1,11 @@
+# Core dependencies (CPU-only, macOS compatible)
+numpy>=1.24.0
+torch>=2.0.0
+transformers>=4.30.0
+huggingface-hub>=0.15.0
+tqdm>=4.65.0
+click>=8.1.0
+
+# Optional GPU dependencies (uncomment if you have NVIDIA GPU)
+# cuda-python>=12.0.0  # For CUDA kernel interface
+# cupy-cuda12x>=12.0.0  # For GPU operations
