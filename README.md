@@ -1,4 +1,4 @@
-# MPGGUF - Mixed-Precision GGUF Builder
+# MPGGUF - Mixed-Precision GGUF
 
 A powerful tool for creating mixed-precision GGUF files that combine INT8 (Q8_0) and INT2 (Q2_K/IQ2_XXS) quantizations in a single optimized binary format.
 
@@ -11,6 +11,16 @@ MPGGUF (Mixed-Precision GGUF) allows you to create models that use:
 - **Single file format** for easy distribution and deployment
 
 **Result**: Better accuracy than pure Q2 models with smaller size than pure Q8 models!
+
+## 🌍 Platform Support
+
+| Platform | MPGGUF Core | llama.cpp | GPU Acceleration | Status |
+|----------|-------------|-----------|------------------|--------|
+| **macOS** | ✅ Full | ✅ Metal | ✅ Apple Silicon | **Tested** |
+| **Linux** | ✅ Full | ✅ CUDA/ROCm | ✅ NVIDIA/AMD | **Compatible** |
+| **Windows** | ✅ Full | ✅ CUDA/DirectML | ✅ NVIDIA | **Compatible** |
+
+**Core MPGGUF features work identically across all platforms. Only GPU acceleration varies.**
 
 ## 📊 Performance Benefits
 
@@ -32,16 +42,59 @@ cd MPGGUF
 
 # Set up Python environment
 python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+# Activate virtual environment:
+source .venv/bin/activate      # Linux/macOS
+# .venv\Scripts\activate       # Windows
 pip install -r requirements.txt
+```
 
-# Set up llama.cpp (for generating GGUF files)
+#### Set up llama.cpp (Platform-Specific)
+
+**macOS (Apple Silicon - M1/M2/M3):**
+```bash
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp && mkdir build && cd build
+cmake .. -DLLAMA_METAL=ON -DCMAKE_BUILD_TYPE=Release
+make -j$(sysctl -n hw.ncpu)
+cd ../..
+```
+
+**Linux (NVIDIA GPU):**
+```bash
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp && mkdir build && cd build
+cmake .. -DLLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+cd ../..
+```
+
+**Linux (CPU only):**
+```bash
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp && mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+cd ../..
+```
+
+**Windows (NVIDIA GPU):**
+```cmd
 git clone https://github.com/ggml-org/llama.cpp.git
 cd llama.cpp
 mkdir build && cd build
-cmake .. -DLLAMA_METAL=ON -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-cd ../..
+cmake .. -DLLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build . --config Release -j
+cd ..\..
+```
+
+**Windows (CPU only):**
+```cmd
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . --config Release -j
+cd ..\..
 ```
 
 ### Basic Usage
@@ -52,7 +105,10 @@ cd ../..
 python scripts/download_models.py --model qwen2.5-7b
 
 # Generate different quantization levels
+# Linux/macOS:
 ./scripts/generate_ggufs.sh
+# Windows:
+# bash scripts/generate_ggufs.sh  (or use Git Bash/WSL)
 ```
 
 2. **Create mixed-precision MPGGUF:**
@@ -242,8 +298,10 @@ python src/validation/error_analysis.py \
 
 **"FileNotFoundError: GGUF file not found"**
 ```bash
-# Check file paths are correct
+# Linux/macOS:
 ls -la your_models_directory/
+# Windows:
+dir your_models_directory\
 ```
 
 **"unpack requires a buffer of X bytes"**
@@ -256,6 +314,36 @@ python src/mpgguf_builder.py --q8 ... --q2 ... --out ...
 ```bash
 # Ensure Q8 and Q2 files are from same base model
 # Check tensor names match between files
+```
+
+### Platform-Specific Issues
+
+**Windows: "bash: command not found"**
+```cmd
+# Option 1: Use Git Bash or WSL
+bash scripts/generate_ggufs.sh
+
+# Option 2: Run commands manually
+python ../llama.cpp/convert_hf_to_gguf.py models/your_model --outtype f16
+../llama.cpp/build/bin/Release/llama-quantize.exe model.F16.gguf model.Q8_0.gguf Q8_0
+```
+
+**macOS: "Permission denied" for scripts**
+```bash
+chmod +x scripts/*.sh
+./scripts/generate_ggufs.sh
+```
+
+**Linux: CUDA not found**
+```bash
+# Install CUDA toolkit first
+# Ubuntu/Debian:
+sudo apt install nvidia-cuda-toolkit
+
+# Then rebuild llama.cpp with CUDA
+cd llama.cpp/build
+cmake .. -DLLAMA_CUDA=ON
+make -j$(nproc)
 ```
 
 ### Performance Issues
@@ -287,10 +375,10 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [Hugging Face](https://huggingface.co) for model hosting and transformers library
 - GGML community for quantization research and implementations
 
-## 📞 Support
+## Support
 
 - **Issues**: [GitHub Issues](https://github.com/pushpakumarbalan/MPGGUF/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/pushpakumarbalan/MPGGUF/discussions)
+<!-- - **Discussions**: [GitHub Discussions](https://github.com/pushpakumarbalan/MPGGUF/discussions) -->
 - **Documentation**: This README and inline code comments
 
 ---
