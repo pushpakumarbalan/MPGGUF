@@ -1,7 +1,7 @@
 /*
  * MPGGUF CUDA Dequantization Kernels
  * 
- * This file contains CUDA kernels for dequantizing Q8_0 and Q2_0 tensors
+ * This file contains CUDA kernels for dequantizing Q8_0 and Q2_k tensors
  * back to FP16 format for validation against baseline models.
  */
 
@@ -40,294 +40,222 @@ __global__ void dequantize_q8_0_kernel(
     
     const int block_idx = i / Q8_0_BLOCK_SIZE;
     const int elem_idx = i % Q8_0_BLOCK_SIZE;
-    
-    const struct block_q8_0* x = (const struct block_q8_0*)vx;
-    const struct block_q8_0* block = &x[block_idx];
-    
-    // Dequantize: value = scale * quantized_value
-    y[i] = __hmul(block->scale, __int2half_rn(block->qs[elem_idx]));
-}
+    // MPGGUF CUDA Dequantization Kernels
+    //
+    // Corrected implementation for Q8_0 and Q2_K dequantization.
 
-/**
- * CUDA kernel to dequantize Q2_0 format to FP16
- */
-__global__ void dequantize_q2_0_kernel(
-    const void* __restrict__ vx,    // Input Q2_0 data
-    half* __restrict__ y,           // Output FP16 data
-    const int k                     // Number of elements
-) {
-    const int i = blockDim.x * blockIdx.x + threadIdx.x;
-    
-    if (i >= k) return;
-    
-    const int block_idx = i / Q2_0_BLOCK_SIZE;
-    const int elem_idx = i % Q2_0_BLOCK_SIZE;
-    
-    const struct block_q2_0* x = (const struct block_q2_0*)vx;
-    const struct block_q2_0* block = &x[block_idx];
-    
-    // Extract 2-bit value from packed data
-    const int byte_idx = elem_idx / 4;
-    const int bit_offset = (elem_idx % 4) * 2;
-    const uint8_t packed_byte = block->qs[byte_idx];
-    const uint8_t q2_val = (packed_byte >> bit_offset) & 0x03;
-    
-    // Convert 2-bit value to signed range (-1, 0, 1, 2) -> (-1.5, -0.5, 0.5, 1.5)
-    const float q2_float = (float)q2_val - 1.5f;
-    
-    // Dequantize: value = scale * (q2_value - 1.5)
-    y[i] = __hmul(block->scale, __float2half(q2_float));
-}
+    #include <cuda_runtime.h>
+    #include <cuda_fp16.h>
+    #include <stdio.h>
+    #include <stdint.h>
 
-/**
- * CUDA kernel to compute element-wise squared error between two FP16 arrays
- */
-__global__ void compute_squared_error_kernel(
-    const half* __restrict__ a,     // First FP16 array
-    const half* __restrict__ b,     // Second FP16 array  
-    float* __restrict__ errors,     // Output squared errors
-    const int n                     // Number of elements
-) {
-    const int i = blockDim.x * blockIdx.x + threadIdx.x;
-    
-    if (i >= n) return;
-    
-    const float diff = __half2float(a[i]) - __half2float(b[i]);
-    errors[i] = diff * diff;
-}
+    // Define ggml_half for the CUDA file
+    typedef half ggml_half;
+    typedef half2 ggml_half2;
 
-/**
- * CUDA kernel to compute sum reduction for MSE calculation
- */
-__global__ void reduce_sum_kernel(
-    const float* __restrict__ input,    // Input array
-    float* __restrict__ output,         // Output partial sums
-    const int n                         // Number of elements
-) {
-    extern __shared__ float sdata[];
+    // K-quants
+    #define QK_K 256
+    #define Q8_0_BLOCK_SIZE 32
+
+    // Q8_0 block structure
+    struct block_q8_0 {
+        half scale;
+        int8_t qs[Q8_0_BLOCK_SIZE];
+    };
+
+    // 2-bit quantization (Q2_K)
+    // 16 blocks of 16 elements each
+    typedef struct {
+        uint8_t scales[QK_K/16]; // scales and mins, quantized with 4 bits
+        uint8_t qs[QK_K/4];      // quants
+        union {
+            struct {
+                ggml_half d;      // super-block scale for quantized scales
+                ggml_half dmin;   // super-block scale for quantized mins
+            } ;
+            ggml_half2 dm;
+        } ;
+    } block_q2_K;
+
+    /**
+     * CUDA kernel to dequantize Q8_0 format to FP16
+     */
+    __global__ void dequantize_q8_0_kernel(
+        const void* __restrict__ vx,    // Input Q8_0 data
+        half* __restrict__ y,           // Output FP16 data
+        const int k                     // Number of elements
+    ) {
+        const int i = blockDim.x * blockIdx.x + threadIdx.x;
+        if (i >= k) return;
     
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+        const int block_idx = i / Q8_0_BLOCK_SIZE;
+        const int elem_idx = i % Q8_0_BLOCK_SIZE;
     
-    // Load data into shared memory
-    sdata[tid] = (i < n) ? input[i] : 0.0f;
-    __syncthreads();
+        const struct block_q8_0* x = (const struct block_q8_0*)vx;
+        const struct block_q8_0* block = &x[block_idx];
     
-    // Perform reduction in shared memory
-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sdata[tid] += sdata[tid + s];
+        // Dequantize: value = scale * quantized_value
+        y[i] = __hmul(block->scale, __int2half_rn(block->qs[elem_idx]));
+    }
+
+    /**
+     * CUDA kernel to dequantize Q2_K format to FP16
+     */
+    __global__ void dequantize_q2_k_kernel(
+        const void* __restrict__ vx,    // Input Q2_K data
+        half* __restrict__ y,           // Output FP16 data
+        const int k                     // Number of elements
+    ) {
+        const int i = blockDim.x * blockIdx.x + threadIdx.x;
+        if (i >= k) return;
+
+        const int super_block_idx = i / QK_K; // Index of the 256-element super-block
+        const int elem_in_super_block = i % QK_K;
+
+        const int sub_block_idx = elem_in_super_block / 16; // Index of the 16-element sub-block (0-15)
+        const int elem_in_sub_block = elem_in_super_block % 16;
+
+        const block_q2_K* x = (const block_q2_K*)vx;
+        const block_q2_K* super_block = &x[super_block_idx];
+
+        // 1. Get super-block scales (fp16)
+        const float d = __half2float(super_block->d);
+        const float dmin = __half2float(super_block->dmin);
+
+        // 2. Get sub-block 4-bit scale and 4-bit min
+        // scales[] stores 16 pairs of 4-bit (min, scale)
+        const uint8_t scale_byte = super_block->scales[sub_block_idx];
+        const uint8_t scale_nibble = scale_byte & 0x0F; // Low 4 bits
+        const uint8_t min_nibble = (scale_byte >> 4) & 0x0F; // High 4 bits
+
+        // 3. Dequantize sub-block scale and min
+        const float sub_block_scale = d * scale_nibble;
+        const float sub_block_min = dmin * min_nibble;
+
+        // 4. Find the 2-bit quantized value
+        const int qs_byte_idx = elem_in_super_block / 4; // Each byte holds 4 2-bit values
+        const int qs_bit_offset = (elem_in_super_block % 4) * 2;
+        const uint8_t qs_byte = super_block->qs[qs_byte_idx];
+        const uint8_t q_val = (qs_byte >> qs_bit_offset) & 0x03; // Get the 2-bit value (0, 1, 2, or 3)
+
+        // 5. Calculate final value: value = (sub_block_scale * q) + sub_block_min
+        y[i] = __float2half((sub_block_scale * q_val) + sub_block_min);
+    }
+
+    // --- Host Functions ---
+    extern "C" void dequantize_q8_0_cuda(
+        const void* input,
+        half* output,
+        int num_elements
+    ) {
+        const int block_size = 256;
+        const int grid_size = (num_elements + block_size - 1) / block_size;
+        dequantize_q8_0_kernel<<<grid_size, block_size>>>(input, output, num_elements);
+        cudaGetLastError(); // Check for errors
+    }
+
+    extern "C" void dequantize_q2_k_cuda(
+        const void* input,
+        half* output,
+        int num_elements
+    ) {
+        const int block_size = 256;
+        const int grid_size = (num_elements + block_size - 1) / block_size;
+        dequantize_q2_k_kernel<<<grid_size, block_size>>>(input, output, num_elements);
+        cudaGetLastError(); // Check for errors
+    }
+
+    // Kernel to convert half to float
+    __global__ void half_to_float_kernel(const half* input, float* output, int n) {
+        int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i < n) output[i] = __half2float(input[i]);
+    }
+
+    // Kernel to compute sum of squared errors
+    __global__ void mse_kernel(const float* dequant, const float* baseline, float* sum_sq_err, size_t n) {
+        size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < n) {
+            float diff = dequant[idx] - baseline[idx];
+            atomicAdd(sum_sq_err, diff * diff);
         }
-        __syncthreads();
     }
-    
-    // Write result for this block to global memory
-    if (tid == 0) {
-        output[blockIdx.x] = sdata[0];
-    }
-}
 
-/**
- * Host function to launch Q8_0 dequantization
- */
-extern "C" void dequantize_q8_0_cuda(
-    const void* input,      // Q8_0 quantized data
-    half* output,           // FP16 output array
-    int num_elements        // Total number of elements
-) {
-    const int block_size = 256;
-    const int grid_size = (num_elements + block_size - 1) / block_size;
-    
-    dequantize_q8_0_kernel<<<grid_size, block_size>>>(input, output, num_elements);
-    
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "CUDA kernel error in dequantize_q8_0: %s\n", cudaGetErrorString(err));
-    }
-}
-
-/**
- * Host function to launch Q2_0 dequantization  
- */
-extern "C" void dequantize_q2_0_cuda(
-    const void* input,      // Q2_0 quantized data
-    half* output,           // FP16 output array
-    int num_elements        // Total number of elements
-) {
-    const int block_size = 256;
-    const int grid_size = (num_elements + block_size - 1) / block_size;
-    
-    dequantize_q2_0_kernel<<<grid_size, block_size>>>(input, output, num_elements);
-    
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "CUDA kernel error in dequantize_q2_0: %s\n", cudaGetErrorString(err));
-    }
-}
-
-/**
- * Host function to compute MSE between two FP16 arrays on GPU
- */
-extern "C" float compute_mse_cuda(
-    const half* array_a,    // First FP16 array
-    const half* array_b,    // Second FP16 array
-    int num_elements        // Number of elements
-) {
-    // Allocate device memory for squared errors
-    float* d_errors;
-    cudaMalloc(&d_errors, num_elements * sizeof(float));
-    
-    // Compute squared errors
-    const int block_size = 256;
-    int grid_size = (num_elements + block_size - 1) / block_size;
-    
-    compute_squared_error_kernel<<<grid_size, block_size>>>(
-        array_a, array_b, d_errors, num_elements
-    );
-    
-    // Perform reduction to sum all squared errors
-    float* d_partial_sums;
-    const int max_blocks = 65535;  // Max grid size for reduction
-    grid_size = min(grid_size, max_blocks);
-    
-    cudaMalloc(&d_partial_sums, grid_size * sizeof(float));
-    
-    const int shared_mem_size = block_size * sizeof(float);
-    reduce_sum_kernel<<<grid_size, block_size, shared_mem_size>>>(
-        d_errors, d_partial_sums, num_elements
-    );
-    
-    // Copy partial sums back and finish reduction on CPU
-    float* h_partial_sums = new float[grid_size];
-    cudaMemcpy(h_partial_sums, d_partial_sums, grid_size * sizeof(float), cudaMemcpyDeviceToHost);
-    
-    float total_sum = 0.0f;
-    for (int i = 0; i < grid_size; i++) {
-        total_sum += h_partial_sums[i];
-    }
-    
-    // Cleanup
-    delete[] h_partial_sums;
-    cudaFree(d_errors);
-    cudaFree(d_partial_sums);
-    
-    // Return MSE
-    return total_sum / num_elements;
-}
-
-/**
- * Host function to compute RMSE between two FP16 arrays
- */
-extern "C" float compute_rmse_cuda(
-    const half* array_a,    // First FP16 array
-    const half* array_b,    // Second FP16 array
-    int num_elements        // Number of elements  
-) {
-    float mse = compute_mse_cuda(array_a, array_b, num_elements);
-    return sqrtf(mse);
-}
-
-/**
- * Utility function to check CUDA device properties
- */
-extern "C" void print_cuda_device_info() {
-    int device_count;
-    cudaGetDeviceCount(&device_count);
-    
-    printf("CUDA Device Information:\n");
-    printf("Found %d CUDA device(s)\n\n", device_count);
-    
-    for (int i = 0; i < device_count; i++) {
-        cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, i);
+    // Host function to compute MSE for Q8_0
+    extern "C" void compute_mse_q8_0_cuda(const float* baseline, const uint8_t* q8_data, size_t num_elements, double* mse_out, double* rmse_out) {
+        float* d_baseline;
+        half* d_dequant_half;
+        float* d_dequant;
+        float* d_sum_sq_err;
         
-        printf("Device %d: %s\n", i, prop.name);
-        printf("  Compute Capability: %d.%d\n", prop.major, prop.minor);
-        printf("  Global Memory: %.2f GB\n", prop.totalGlobalMem / 1024.0 / 1024.0 / 1024.0);
-        printf("  Shared Memory per Block: %zu KB\n", prop.sharedMemPerBlock / 1024);
-        printf("  Max Threads per Block: %d\n", prop.maxThreadsPerBlock);
-        printf("  Max Grid Size: (%d, %d, %d)\n", 
-               prop.maxGridSize[0], prop.maxGridSize[1], prop.maxGridSize[2]);
-        printf("\n");
+        cudaMalloc(&d_baseline, num_elements * sizeof(float));
+        cudaMalloc(&d_dequant_half, num_elements * sizeof(half));
+        cudaMalloc(&d_dequant, num_elements * sizeof(float));
+        cudaMalloc(&d_sum_sq_err, sizeof(float));
+        
+        cudaMemcpy(d_baseline, baseline, num_elements * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemset(d_sum_sq_err, 0, sizeof(float));
+        
+        // Dequantize
+        dequantize_q8_0_cuda((const void*)q8_data, d_dequant_half, num_elements);
+        
+        // Convert to float
+        int block_size = 256;
+        int grid_size = (num_elements + block_size - 1) / block_size;
+        half_to_float_kernel<<<grid_size, block_size>>>(d_dequant_half, d_dequant, num_elements);
+        
+        // Compute MSE
+        mse_kernel<<<grid_size, block_size>>>(d_dequant, d_baseline, d_sum_sq_err, num_elements);
+        
+        float sum_sq_err;
+        cudaMemcpy(&sum_sq_err, d_sum_sq_err, sizeof(float), cudaMemcpyDeviceToHost);
+        
+        double mse = sum_sq_err / num_elements;
+        double rmse = sqrt(mse);
+        *mse_out = mse;
+        *rmse_out = rmse;
+        
+        cudaFree(d_baseline);
+        cudaFree(d_dequant_half);
+        cudaFree(d_dequant);
+        cudaFree(d_sum_sq_err);
     }
-}
 
-/**
- * Test function to validate kernel implementations
- */
-extern "C" int test_dequantization_kernels() {
-    printf("Testing CUDA dequantization kernels...\n");
-    
-    // Test parameters
-    const int num_elements = 1024;
-    const int num_blocks_q8 = (num_elements + Q8_0_BLOCK_SIZE - 1) / Q8_0_BLOCK_SIZE;
-    const int num_blocks_q2 = (num_elements + Q2_0_BLOCK_SIZE - 1) / Q2_0_BLOCK_SIZE;
-    
-    // Allocate host memory for test data
-    struct block_q8_0* h_q8_data = (struct block_q8_0*)malloc(num_blocks_q8 * sizeof(struct block_q8_0));
-    struct block_q2_0* h_q2_data = (struct block_q2_0*)malloc(num_blocks_q2 * sizeof(struct block_q2_0));
-    half* h_output_q8 = (half*)malloc(num_elements * sizeof(half));
-    half* h_output_q2 = (half*)malloc(num_elements * sizeof(half));
-    
-    // Initialize test data
-    for (int i = 0; i < num_blocks_q8; i++) {
-        h_q8_data[i].scale = __float2half(1.0f);  // Unit scale for testing
-        for (int j = 0; j < Q8_0_BLOCK_SIZE; j++) {
-            h_q8_data[i].qs[j] = (int8_t)(j - 16);  // Test pattern
-        }
+    // Host function to compute MSE for Q2_K
+    extern "C" void compute_mse_q2_k_cuda(const float* baseline, const uint8_t* q2_data, size_t num_elements, double* mse_out, double* rmse_out) {
+        float* d_baseline;
+        half* d_dequant_half;
+        float* d_dequant;
+        float* d_sum_sq_err;
+        
+        cudaMalloc(&d_baseline, num_elements * sizeof(float));
+        cudaMalloc(&d_dequant_half, num_elements * sizeof(half));
+        cudaMalloc(&d_dequant, num_elements * sizeof(float));
+        cudaMalloc(&d_sum_sq_err, sizeof(float));
+        
+        cudaMemcpy(d_baseline, baseline, num_elements * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemset(d_sum_sq_err, 0, sizeof(float));
+        
+        // Dequantize
+        dequantize_q2_k_cuda((const void*)q2_data, d_dequant_half, num_elements);
+        
+        // Convert to float
+        int block_size = 256;
+        int grid_size = (num_elements + block_size - 1) / block_size;
+        half_to_float_kernel<<<grid_size, block_size>>>(d_dequant_half, d_dequant, num_elements);
+        
+        // Compute MSE
+        mse_kernel<<<grid_size, block_size>>>(d_dequant, d_baseline, d_sum_sq_err, num_elements);
+        
+        float sum_sq_err;
+        cudaMemcpy(&sum_sq_err, d_sum_sq_err, sizeof(float), cudaMemcpyDeviceToHost);
+        
+        double mse = sum_sq_err / num_elements;
+        double rmse = sqrt(mse);
+        *mse_out = mse;
+        *rmse_out = rmse;
+        
+        cudaFree(d_baseline);
+        cudaFree(d_dequant_half);
+        cudaFree(d_dequant);
+        cudaFree(d_sum_sq_err);
     }
-    
-    for (int i = 0; i < num_blocks_q2; i++) {
-        h_q2_data[i].scale = __float2half(1.0f);  // Unit scale for testing
-        for (int j = 0; j < 8; j++) {
-            h_q2_data[i].qs[j] = 0x1B;  // 0b00011011 = values 3,2,1,0
-        }
-    }
-    
-    // Allocate device memory
-    void* d_q8_data;
-    void* d_q2_data;
-    half* d_output_q8;
-    half* d_output_q2;
-    
-    cudaMalloc(&d_q8_data, num_blocks_q8 * sizeof(struct block_q8_0));
-    cudaMalloc(&d_q2_data, num_blocks_q2 * sizeof(struct block_q2_0));
-    cudaMalloc(&d_output_q8, num_elements * sizeof(half));
-    cudaMalloc(&d_output_q2, num_elements * sizeof(half));
-    
-    // Copy test data to device
-    cudaMemcpy(d_q8_data, h_q8_data, num_blocks_q8 * sizeof(struct block_q8_0), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_q2_data, h_q2_data, num_blocks_q2 * sizeof(struct block_q2_0), cudaMemcpyHostToDevice);
-    
-    // Run kernels
-    dequantize_q8_0_cuda(d_q8_data, d_output_q8, num_elements);
-    dequantize_q2_0_cuda(d_q2_data, d_output_q2, num_elements);
-    
-    // Copy results back
-    cudaMemcpy(h_output_q8, d_output_q8, num_elements * sizeof(half), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_output_q2, d_output_q2, num_elements * sizeof(half), cudaMemcpyDeviceToHost);
-    
-    // Verify results (basic sanity check)
-    printf("Q8_0 dequantization test - first 8 values:\n");
-    for (int i = 0; i < 8; i++) {
-        printf("  [%d]: %f\n", i, __half2float(h_output_q8[i]));
-    }
-    
-    printf("Q2_0 dequantization test - first 8 values:\n");
-    for (int i = 0; i < 8; i++) {
-        printf("  [%d]: %f\n", i, __half2float(h_output_q2[i]));
-    }
-    
-    // Cleanup
-    free(h_q8_data);
-    free(h_q2_data);
-    free(h_output_q8);
-    free(h_output_q2);
-    cudaFree(d_q8_data);
-    cudaFree(d_q2_data);
-    cudaFree(d_output_q8);
-    cudaFree(d_output_q2);
-    
-    printf("Kernel tests completed successfully!\n");
-    return 0;
-}

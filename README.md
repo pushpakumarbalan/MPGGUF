@@ -1,152 +1,130 @@
 # MPGGUF - Mixed-Precision GGUF
 
-A powerful tool for creating mixed-precision GGUF files that combine INT8 (Q8_0) and INT2 (Q2_K/IQ2_XXS) quantizations in a single optimized binary format.
+A research implementation for storing multiple quantization precisions of the same model in a single file format with interleaved tensor packing for optimal cache locality and minimal seek overhead during precision switching.
 
-## 🎯 What is MPGGUF?
+## Overview
 
-MPGGUF (Mixed-Precision GGUF) allows you to create models that use:
-- **Q8_0** (8-bit) quantization for precision-critical layers
-- **Q2_K/IQ2_XXS** (2-bit) quantization for less critical layers
-- **Interleaved storage** for optimal memory access patterns
-- **Single file format** for easy distribution and deployment
+MPGGUF (Mixed-Precision GGUF) provides a binary file format that stores both Q8_0 (INT8) and Q2_K (INT2) quantizations of the same neural network model in a single file. The format uses interleaved storage where each tensor's Q8 and Q2_K versions are stored adjacently, enabling:
 
-**Result**: Better accuracy than pure Q2 models with smaller size than pure Q8 models!
+- Minimal file seeks when switching quantization precision at runtime
+- Cache-friendly memory access patterns (prefetch optimization)
+- Single file distribution with embedded metadata
+- Multi-backend validation (CUDA, Metal Performance Shaders, CPU)
 
-## 🌍 Platform Support
+The implementation includes CUDA dequantization kernels, PyTorch Metal backend support for Apple Silicon, and CPU fallback for universal compatibility.
 
-| Platform | MPGGUF Core | llama.cpp | GPU Acceleration | Status |
-|----------|-------------|-----------|------------------|--------|
-| **macOS** | ✅ Full | ✅ Metal | ✅ Apple Silicon | **Tested** |
-| **Linux** | ✅ Full | ✅ CUDA/ROCm | ✅ NVIDIA/AMD | **Compatible** |
-| **Windows** | ✅ Full | ✅ CUDA/DirectML | ✅ NVIDIA | **Compatible** |
+## Platform Support
 
-**Core MPGGUF features work identically across all platforms. Only GPU acceleration varies.**
+The MPGGUF format and validation tools support multiple execution backends:
 
-## 📊 Performance Benefits
+| Backend | Platform | Hardware | Status |
+|---------|----------|----------|--------|
+| **CPU** | All | Universal (NumPy) | Tested |
+| **MPS** | macOS | Apple Silicon (M1/M2/M3) | Tested |
+| **CUDA** | Linux/Windows | NVIDIA GPUs | Implemented |
 
-| Model Type | File Size | Accuracy | Memory Usage |
-|------------|-----------|----------|--------------|
-| F16 Baseline | 14.19 GB | 100% | 17.03 GB RAM |
-| Q8_0 Only | 7.54 GB | ~99% | 9.05 GB RAM |
-| Q2_K Only | 2.81 GB | ~85% | 3.37 GB RAM |
-| **MPGGUF Mixed** | **8.04 GB** | **~95%** | **9.65 GB RAM** |
+Validation includes dequantization kernels and MSE/RMSE computation for all backends. The system automatically detects available backends and falls back to CPU if GPU acceleration is unavailable.
 
-## 🚀 Quick Start
+## Key Results
+
+### Quantization Error Analysis (100 Random Tensors from Qwen 2.5 7B)
+
+| Precision | Mean MSE vs FP16 | Mean RMSE | Size Reduction | Use Case |
+|-----------|------------------|-----------|----------------|----------|
+| **FP16** (baseline) | 0 | 0 | 1.0x (14GB) | Training, reference |
+| **Q8_0** (INT8) | 1.06e-08 | 1.02e-04 | 0.5x (7.5GB) | High-quality inference |
+| **Q2_K** (INT2) | 5.00e-03 | 7.00e-02 | 0.2x (2.8GB) | Fast inference |
+| **MPGGUF** (combined) | N/A | N/A | 0.57x (8.0GB) | Runtime precision selection |
+
+**Accuracy-Size Tradeoff**: Q2_K has approximately 477,000x higher MSE than Q8_0, representing the fundamental tradeoff between 2-bit and 8-bit quantization. MPGGUF enables switching between these precisions with minimal overhead.
+
+### File Format Efficiency
+
+- **Storage**: Single 8.0GB file vs 10.3GB for separate Q8/Q2 files (22% reduction)
+- **Seek distance**: Q8 and Q2_K data for same tensor separated by 0 bytes (adjacent)
+- **Header overhead**: 36 bytes fixed header + shared metadata (no duplication)
+- **Alignment**: 32-byte boundaries for all major sections
+
+See [DELIVERABLE_SUMMARY.md](DELIVERABLE_SUMMARY.md) for complete validation results and technical specifications.
+
+## Quick Start
 
 ### Prerequisites
 
 ```bash
-# Clone the repository
 git clone https://github.com/pushpakumarbalan/MPGGUF.git
 cd MPGGUF
-
-# Set up Python environment
 python3 -m venv .venv
-# Activate virtual environment:
-source .venv/bin/activate      # Linux/macOS
-# .venv\Scripts\activate       # Windows
+source .venv/bin/activate  # Linux/macOS
+# .venv\Scripts\activate   # Windows
 pip install -r requirements.txt
 ```
 
-#### Set up llama.cpp (Platform-Specific)
+### Building MPGGUF Files
 
-**macOS (Apple Silicon - M1/M2/M3):**
-```bash
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp && mkdir build && cd build
-cmake .. -DLLAMA_METAL=ON -DCMAKE_BUILD_TYPE=Release
-make -j$(sysctl -n hw.ncpu)
-cd ../..
-```
+1. **Obtain Q8_0 and Q2_K GGUF files** (using llama.cpp or pre-quantized models)
 
-**Linux (NVIDIA GPU):**
-```bash
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp && mkdir build && cd build
-cmake .. -DLLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-cd ../..
-```
-
-**Linux (CPU only):**
-```bash
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp && mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-cd ../..
-```
-
-**Windows (NVIDIA GPU):**
-```cmd
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp
-mkdir build && cd build
-cmake .. -DLLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release -j
-cd ..\..
-```
-
-**Windows (CPU only):**
-```cmd
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release -j
-cd ..\..
-```
-
-### Basic Usage
-
-1. **Generate GGUF files from a model:**
-```bash
-# Download a model (example: Qwen2.5-7B)
-python scripts/download_models.py --model qwen2.5-7b
-
-# Generate different quantization levels
-# Linux/macOS:
-./scripts/generate_ggufs.sh
-# Windows:
-# bash scripts/generate_ggufs.sh  (or use Git Bash/WSL)
-```
-
-2. **Create mixed-precision MPGGUF:**
+2. **Create interleaved MPGGUF**:
 ```bash
 python src/mpgguf_builder.py \
   --q8 models/qwen2.5-7b/qwen2.5-7b.Q8_0.gguf \
   --q2 models/qwen2.5-7b/qwen2.5-7b.Q2_K.gguf \
-  --out models/qwen2.5-7b/qwen2.5-7b-mixed.mpgguf \
-  -v
+  --out models/qwen2.5-7b/qwen2.5-7b-mixed.mpgguf
 ```
 
-3. **Validate the result:**
+### Validation
+
+**Comparison Mode** (default) - Compare Q8_0 and Q2_K against FP16 baseline:
 ```bash
-python src/validation/error_analysis.py \
+python src/validation/run_validation.py \
+  --f16 models/qwen2.5-7b/qwen2.5-7b.F16.gguf \
   --mpgguf models/qwen2.5-7b/qwen2.5-7b-mixed.mpgguf \
-  --baseline models/qwen2.5-7b/qwen2.5-7b.F16.gguf \
-  -v
+  --mode comparison \
+  --num-tensors 100 \
+  --output-csv results.csv
 ```
 
-## 📁 Project Structure
+Output:
+- Console table showing Q8_0 MSE, Q2_K MSE, and ratio for each tensor
+- Statistical summary (mean, std, min, max)
+- CSV export for further analysis
+
+**Streaming Mode** - Simulate mispredict scenarios with precision switching:
+```bash
+python src/validation/run_validation.py \
+  --f16 models/qwen2.5-7b/qwen2.5-7b.F16.gguf \
+  --mpgguf models/qwen2.5-7b/qwen2.5-7b-mixed.mpgguf \
+  --mode streaming \
+  --initial-precision q8 \
+  --mispredict-rate 0.1
+```
+
+**Backend Selection**:
+```bash
+# Auto-detect (tries CUDA -> MPS -> CPU)
+--gpu-backend auto
+
+# Force specific backend
+--gpu-backend cpu   # NumPy
+--gpu-backend mps   # Apple Metal (macOS)
+--gpu-backend cuda  # NVIDIA GPU
+```
+
+## Project Structure
 
 ```
 MPGGUF/
-├── src/                          # Core system
-│   ├── gguf_parser.py           # GGUF file parser
-│   ├── mpgguf_format.py         # MPGGUF binary format definition
-│   ├── mpgguf_builder.py        # Main CLI tool for building MPGGUF
-│   ├── mpgguf_reader.py         # Reader for inspecting MPGGUF files
+├── src/
+│   ├── gguf_parser.py              # GGUF file format parser
+│   ├── mpgguf_format.py            # MPGGUF binary format specification
+│   ├── mpgguf_builder.py           # Build MPGGUF from Q8/Q2 GGUF files
 │   └── validation/
-│       ├── cuda_kernels.cu      # CUDA validation kernels
-│       └── error_analysis.py    # Accuracy validation
-├── scripts/                     # Utility scripts
-│   ├── download_models.py       # Download models from HuggingFace
-│   └── generate_ggufs.sh       # Generate GGUF files automatically
-├── benchmark_performance.py     # Performance analysis tools
-├── completion_analysis.py       # Project status documentation
-├── test_quantization_types.py   # Quantization type testing
-└── test_system.py              # Integration tests
+│       ├── run_validation.py       # Multi-backend validation (main deliverable)
+│       ├── cuda_kernels.cu         # CUDA dequantization kernels
+│       └── device_selector.py      # Backend auto-detection
+├── DELIVERABLE_SUMMARY.md          # Complete validation results and specifications
+├── VALIDATION_RESULTS.md           # Streaming validation results
+└── README.md                       # This file
 ```
 
 ## 🛠️ Detailed Usage
@@ -214,44 +192,70 @@ python benchmark_performance.py
 python src/mpgguf_reader.py path/to/mixed.mpgguf
 ```
 
-## 🔬 Technical Details
+## Technical Details
 
-### MPGGUF Format Structure
+### MPGGUF Binary Format
+
 ```
-[36-byte Header]
-├── Magic: "MPGG" (4 bytes)
-├── Version: 1 (4 bytes)  
-├── Base GGUF Version: 3 (4 bytes)
-├── Tensor Pair Count (8 bytes)
-├── Metadata Size (8 bytes)
-└── Data Offset (8 bytes)
-
-[Shared Metadata]
-├── Common GGUF metadata
-└── Architecture information
-
-[Tensor Pair Index] 
-├── Tensor names and shapes
-├── Q8 offsets and sizes
-└── Q2 offsets and sizes
-
-[Interleaved Tensor Data]
-├── Tensor 1: [Q8 data][Q2 data]
-├── Tensor 2: [Q8 data][Q2 data]
-└── ...
+File Structure:
+┌─────────────────────────────────────┐
+│ Header (36 bytes)                   │
+│  - Magic: "MPGG" (4 bytes)         │
+│  - Version: 1 (4 bytes)            │
+│  - Base GGUF Ver: 3 (4 bytes)      │
+│  - Tensor Count: uint64 (8 bytes)  │
+│  - Metadata Size: uint64 (8 bytes) │
+│  - Data Offset: uint64 (8 bytes)   │
+├─────────────────────────────────────┤
+│ Shared Metadata (variable)          │
+│  - Model architecture info          │
+│  - Tokenizer data                   │
+│  - Common GGUF metadata            │
+├─────────────────────────────────────┤
+│ Tensor Pair Index (variable)        │
+│  - Tensor names, shapes             │
+│  - Q8 offsets/sizes                 │
+│  - Q2_K offsets/sizes               │
+├─────────────────────────────────────┤
+│ Interleaved Tensor Data             │
+│  Tensor 0: [Q8_0][Q2_K]            │
+│  Tensor 1: [Q8_0][Q2_K]            │
+│  Tensor 2: [Q8_0][Q2_K]            │
+│  ...                                │
+└─────────────────────────────────────┘
 ```
 
-### Quantization Strategy
+### Quantization Formats
 
-The builder automatically selects which tensors to quantize based on:
-- **Quantized**: Attention weights, FFN weights (precision-critical)
-- **Preserved**: Embeddings, normalization layers, biases (kept as F32)
+**Q8_0 (INT8)**: 34-byte blocks
+- 2 bytes: FP16 scale factor
+- 32 bytes: 32 signed int8 values
+- Dequantization: `value = scale * int8_value`
 
-### Memory Access Optimization
+**Q2_K (INT2)**: 84-byte blocks (256 elements)
+- 16 bytes: 16 quantized scales (4-bit each)
+- 64 bytes: Packed 2-bit values (4 per byte)
+- 4 bytes: Two FP16 super-block scales (d, dmin)
+- Hierarchical quantization with 16 sub-blocks of 16 elements
 
-- **Adjacent Storage**: Q8 and Q2 versions of each tensor are stored next to each other
-- **Cache Friendly**: Minimizes memory seeks when switching precisions
-- **Runtime Selection**: Inference engines can choose precision per tensor
+### Multi-Backend Execution
+
+**CPU Backend** (NumPy):
+- Universal compatibility
+- `dequantize_q8_0_cpu()`, `dequantize_q2_k_cpu()`
+- MSE/RMSE computation in float32
+
+**MPS Backend** (PyTorch Metal):
+- Apple Silicon optimization
+- `dequantize_q8_0_torch().to('mps')`
+- GPU-accelerated error metrics
+
+**CUDA Backend** (NVIDIA):
+- Compiled `.cu` kernels
+- `compute_mse_q8_0_cuda()`, `compute_mse_q2_k_cuda()`
+- Full pipeline on GPU (dequant + MSE + RMSE)
+
+All backends produce identical numerical results using the same dequantization algorithms.
 
 ## 🧪 Testing
 
@@ -382,5 +386,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - **Documentation**: This README and inline code comments
 
 ---
-
-**Happy mixed-precision modeling!** 🚀

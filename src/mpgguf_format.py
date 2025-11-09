@@ -10,7 +10,23 @@ import struct
 from typing import Dict, List, Tuple, Any, BinaryIO
 from dataclasses import dataclass
 from enum import IntEnum
-from gguf_parser import GGUFParser, TensorInfo, GGMLType
+from pathlib import Path
+import sys
+import importlib.util
+
+# Import from relative path
+def load_module_from_path(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+# Load gguf_parser from the same directory
+_gguf_parser_path = Path(__file__).parent / "gguf_parser.py"
+_gguf_parser = load_module_from_path(_gguf_parser_path, "gguf_parser")
+GGUFParser = _gguf_parser.GGUFParser
+TensorInfo = _gguf_parser.TensorInfo
+GGMLType = _gguf_parser.GGMLType
 
 
 class MPGGUFVersion(IntEnum):
